@@ -41,7 +41,7 @@ WiFiClient client;
 int bufferSize = 0;
 uint8_t currentClient = 0;
 uint8_t serialBuffer[8193];
-ESP8266WebServer server = ESP8266WebServer(80);
+ESP8266WebServer server (80);
 WebSocketsServer webSocket = WebSocketsServer(81);
 ESP8266WebServer updateServer(82);
 ESP8266HTTPUpdateServer httpUpdater;
