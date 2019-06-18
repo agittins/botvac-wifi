@@ -4,6 +4,7 @@
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <WebSocketsServer.h>
+#include <WebSocketsClient.h>
 #include <Hash.h>
 #include <FS.h>
 #include <WiFiUdp.h>
@@ -13,17 +14,16 @@
 #include <TimedAction.h>
 #include <rBase64.h>
 
-
-#define SSID_FILE "etc/ssid"
-#define PASSWORD_FILE "etc/pass"
-#define SERIAL_FILE "etc/serial"
+#define SSID_FILE "/etc/ssid"
+#define PASSWORD_FILE "/etc/pass"
+#define WSURL_FILE "/etc/wsurl"
+#define SERIAL_FILE "/etc/serial"
 
 #define CONNECT_TIMEOUT_SECS 30
 #define SERIAL_NUMBER_ATTEMPTS 5
 
 #define AP_SSID "neato"
 
-#define FIRMWARE "1.7"
 #define HOSTNAME "botvac-wifi"
 #define MAX_BUFFER 8192
 
@@ -43,15 +43,16 @@ uint8_t currentClient = 0;
 uint8_t serialBuffer[8193];
 ESP8266WebServer server (80);
 WebSocketsServer webSocket = WebSocketsServer(81);
+WebSocketsClient webSocketClient;
 ESP8266WebServer updateServer(82);
 ESP8266HTTPUpdateServer httpUpdater;
 
 void getPage() {
   if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
-   
+
       // Only check battery once at the beginning, once every 60 seconds, or once when it got an empty response.
       if (batteryInfo == "" || batteryInfo == "-FAIL-" || lastBattRun > 11) {
-        getBattery();
+        getBattery("FuelPercent");
         lastBattRun = 0;
       } else {
         lastBattRun++;
@@ -62,42 +63,9 @@ void getPage() {
       } else {
         lastErrRun++;
       }
-      if (serialNumber != "Empty" && lastTimeRun > 287) {
-        setTime();
-        lastTimeRun = 0;
-      } else {
-        lastTimeRun++;
-      }
-      if (batteryInfo != "" && batteryInfo != "-FAIL-" && serialNumber != "Empty") {
-        HTTPClient http;  //Declare an object of class HTTPClient
-        http.begin("http://www.neatoscheduler.com/api/actionPull.php?serial="+serialNumber+"&battery="+batteryInfo+"&firmware="+FIRMWARE+"&errorMsg="+incomingErr);  //Specify request destination
-        int httpCode = http.GET(); //Send the request
-     
-        if (httpCode > 0) { //Check the returning code
-     
-          String payload = http.getString();   //Get the request response payload
-          if (payload.indexOf("None") == -1) {
-            // If it's something other than none, shoot it to the vac.
-            Serial.println(payload);
-          }
-        }
-        http.end();   //Close connection
-        getLidar();   // Lidar push each run
-      }
-    }
-}
 
-void setTime() {
-    HTTPClient http;  //Declare an object of class HTTPClient
-    http.begin("http://www.neatoscheduler.com/api/getTime.php?serial="+serialNumber);  //Specify request destination
-    int httpCode = http.GET(); //Send the request
- 
-    if (httpCode > 0) { //Check the returning code
- 
-      String payload = http.getString();   //Get the request response payload
-      if (payload.indexOf(",") != -1) {
-        // If it's something other than none, shoot it to the vac.
-        Serial.println("SetTime "+payload);
+      if (batteryInfo != "" && batteryInfo != "-FAIL-" && serialNumber != "Empty") {
+        webSocketClient.sendTXT("{ \"header\": { \"ts\": " + String(millis()) + ", \"type\": \"neato\", \"title\": \"neato\" }, \"payload\": {\"serial\": \"" + serialNumber + "\", \"battery\": " + batteryInfo + ", \"errorMsg\": \"" + incomingErr + "\"}}");
       }
     }
 }
@@ -161,65 +129,27 @@ void getError() {
       incomingErr.replace('/', '_');
       incomingErr.replace('=', ',');
     } else {
-      incomingErr = "None";
+      incomingErr = "";
     }
 }
 
-void getLidar() {
-    Serial.setTimeout(500);
-    Serial.println("GetLDSScan");
-    String lidarInfoTemp = Serial.readString();
-    for (int i = 0; i < 360; i++){
-      String currentDegree = String(i);
-      int serialString = lidarInfoTemp.indexOf("\n"+currentDegree+",");
-      if (serialString > -1){
-        int capUntil = serialString+20;
-        String serialCap = lidarInfoTemp.substring(serialString-1, capUntil);
-        int commaIndex = serialCap.indexOf(',');
-        int secondCommaIndex = serialCap.indexOf(',', commaIndex + 1);
-        int thirdCommaIndex = serialCap.indexOf(',', secondCommaIndex + 1);
-        String currentCapture = serialCap.substring(commaIndex+1,secondCommaIndex);
-        if (i == 0) {
-            lidarInfo = serialCap.substring(commaIndex+1,secondCommaIndex);
-        } else {
-            lidarInfo = lidarInfo + "," + serialCap.substring(commaIndex+1,secondCommaIndex);
-        }
-      }
-      lidarInfo.trim();
-    }
-    HTTPClient http;
-    http.begin("http://www.neatoscheduler.com/api/actionPull.php?serial="+serialNumber);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    http.POST("lidar="+lidarInfo);
-    http.writeToStream(&Serial);
-    http.end();
-}
-
-void getBattery() {
+void getBattery(String value) {
     Serial.setTimeout(500);
     Serial.println("GetCharger");
     String batteryInfoTemp = Serial.readString();
-    String checkArray[5] = {"FuelPercent", "ChargingActive", "ChargingEnabled", "BatteryFailure", "BattTempCAvg"};
-    for (int i = 0; i < 5; i++){
-      int serialString = batteryInfoTemp.indexOf(checkArray[i]);
-      if (serialString > -1){
-        int checkLength = checkArray[i].length()+4;
-        int capUntil = serialString+checkLength;
-        int commaIndex = batteryInfoTemp.substring(serialString, capUntil).indexOf(',');
-        String currentItem = batteryInfoTemp.substring(serialString,capUntil);
-        currentItem.trim();
-        if (i == 0) {
-          batteryInfo = currentItem.substring(commaIndex+1,capUntil);
-        } else {
-          batteryInfo = batteryInfo + "," + currentItem.substring(commaIndex+1,capUntil);
-        }
-      }
+    
+    int serialString = batteryInfoTemp.indexOf(value);
+    if (serialString > -1){
+      int checkLength = value.length()+4;
+      int capUntil = serialString+checkLength;
+      int commaIndex = batteryInfoTemp.substring(serialString, capUntil).indexOf(',');
+      String currentItem = batteryInfoTemp.substring(serialString,capUntil);
+      currentItem.trim();
+      
+      batteryInfo = currentItem.substring(commaIndex+1,capUntil);
     }
-    batteryInfo = rbase64.encode(batteryInfo);
-    batteryInfo.replace('+', '-');
-    batteryInfo.replace('/', '_');
-    batteryInfo.replace('=', ',');
 }
+
 //create a couple timers that will fire repeatedly every x ms
 TimedAction checkServer = TimedAction(5000,getPage);
 
@@ -283,6 +213,17 @@ void setupEvent() {
     passwd_file.readString().toCharArray(passwd, 256);
     passwd_file.close();
   }
+
+  char wsurl[256];
+  File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
+  if(!passwd_file) {
+    strcpy(wsurl, "XXX");
+  }
+  else {
+    wsurl_file.readString().toCharArray(wsurl, 256);
+    wsurl_file.close();
+  }
+
   server.send(200, "text/html", String() + 
   "<!DOCTYPE html><html> <body>" +
   "<p>Neato serial number: <b>" + serialNumber + "</b></p>" +
@@ -292,21 +233,28 @@ void setupEvent() {
   "WPA2 Password:<br />" +
   "<input type=\"text\" name=\"password\" value=\"" + passwd + "\"> <br />" +
   "<br />" +
+  "WebSocket server URL:<br />" +
+  "<input type=\"text\" name=\"wsurl\" value=\"" + wsurl + "\"> <br />" +
+  "<br />" +
   "<input type=\"submit\" value=\"Submit\"> </form>" +
-  "<form action=\"http://neato.local/reboot\" style=\"display: inline;\">" +
+  "<form action=\"http://" + HOSTNAME + ".local/reboot\" style=\"display: inline;\">" +
   "<input type=\"submit\" value=\"Reboot\" />" +
   "</form>" +
   "<p>Enter the details for your access point. After you submit, the controller will reboot to apply the settings.</p>" +
-  "<p><a href=\"http://neato.local:82/update\">Update Firmware</a></p>" +
-  "<p><a href=\"http://neato.local/console\">Neato Serial Console</a> - <a href=\"https://www.neatorobotics.com/resources/programmersmanual_20140305.pdf\">Command Documentation</a></p>" +
+  "<p><a href=\"http://" + HOSTNAME + ".local:82/update\">Update Firmware</a></p>" +
+  "<p><a href=\"http://" + HOSTNAME + ".local/console\">Neato Serial Console</a> - <a href=\"https://www.neatorobotics.com/resources/programmersmanual_20140305.pdf\">Command Documentation</a></p>" +
   "</body></html>\n");
 }
 
 void saveEvent() {
   String user_ssid = server.arg("ssid");
   String user_password = server.arg("password");
+  String wsurl = server.arg("wsurl");
+
   SPIFFS.format();
-  if(user_ssid != "" && user_password != "") {
+
+  if(user_ssid != "" && user_password != "" && wsurl.startsWith("ws://")) {
+    SPIFFS.begin();
     File ssid_file = SPIFFS.open(SSID_FILE, "w");
     if (!ssid_file) {
       server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting Access Point SSID failed!</body> </html>");
@@ -314,6 +262,7 @@ void saveEvent() {
     }
     ssid_file.print(user_ssid);
     ssid_file.close();
+
     File passwd_file = SPIFFS.open(PASSWORD_FILE, "w");
     if (!passwd_file) {
       server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting Access Point password failed!</body> </html>");
@@ -322,13 +271,24 @@ void saveEvent() {
     passwd_file.print(user_password);
     passwd_file.close();
 
+    File wsurl_file = SPIFFS.open(WSURL_FILE, "w");
+    if (!wsurl_file) {
+      server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting WebSocket server URL failed!</body> </html>");
+      return;
+    }
+    wsurl_file.print(wsurl);
+    wsurl_file.close();
+
     server.send(200, "text/html", String() + 
     "<!DOCTYPE html><html> <body>" +
-    "Setting Access Point SSID / password was successful! <br />" +
+    "Setup was successful! <br />" +
     "<br />SSID was set to \"" + user_ssid + "\" with the password \"" + user_password + "\". <br />" +
-    "<br /> The controller will now reboot. Please re-connect to your Wi-Fi network.<br />" +
+    "<br />WebSocket server URL was set to \"" + wsurl + "\". <br />" +
+    "<br />The controller will now reboot. Please re-connect to your Wi-Fi network.<br />" +
     "If the SSID or password was incorrect, the controller will return to Access Point mode." +
     "</body> </html>");
+
+    delay(1000);
     ESP.reset();
   }
 }
@@ -386,19 +346,17 @@ void serialEvent() {
   }
 }
 
-void setup() {
-  // start serial
-  // botvac serial console is 115200 baud, 8 data bits, no parity, one stop bit (8N1)
+void setup(void) {
   Serial.begin(115200);
-  
+
   //try to mount the filesystem. if that fails, format the filesystem and try again.
   if(!SPIFFS.begin()) {
     SPIFFS.format();
     SPIFFS.begin();
   }
-    
+
   serialNumber = getSerial();
-  
+
   if(SPIFFS.exists(SSID_FILE) && SPIFFS.exists(PASSWORD_FILE)) {
     File ssid_file = SPIFFS.open(SSID_FILE, "r");
     char ssid[256];
@@ -427,6 +385,22 @@ void setup() {
       ESP.reset(); //reset because there's no good reason for setting up an AP to fail
     }
   }
+
+  // start webserver
+  server.on("/console", serverEvent);
+  server.on("/", HTTP_POST, saveEvent);
+  server.on("/", HTTP_GET, setupEvent);
+  server.on("/reboot", HTTP_GET, rebootEvent);
+  server.onNotFound(serverEvent);
+
+  if (!MDNS.begin(HOSTNAME)) {
+    while (1) {
+      delay(1000);
+    }
+  }
+
+  // Start TCP (HTTP) server
+  server.begin();
 
   // start websocket
   webSocket.begin();
@@ -459,38 +433,48 @@ void setup() {
   ArduinoOTA.begin();
   httpUpdater.setup(&updateServer);
   updateServer.begin();
-  // start webserver
-  server.on("/console", serverEvent);
-  server.on("/", HTTP_POST, saveEvent);
-  server.on("/", HTTP_GET, setupEvent);
-  server.on("/reboot", HTTP_GET, rebootEvent);
-  server.onNotFound(serverEvent);
-  server.begin();
 
-  // start MDNS
-  // this means that the botvac can be reached at http://neato.local or ws://neato.local:81
-  if (!MDNS.begin("neato")) {
-    ESP.reset(); //reset because there's no good reason for setting up MDNS to fail
-  }
+  // Add service to MDNS-SD
   MDNS.addService("http", "tcp", 80);
   MDNS.addService("ws", "tcp", 81);
   MDNS.addService("http", "tcp", 82);
 
   webSocket.sendTXT(currentClient, "ESP-12x: Ready\n");
+
+  if(SPIFFS.exists(WSURL_FILE)) {
+    File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
+    String wsurl = wsurl_file.readString();
+    wsurl_file.close();
+
+    int pos_host = 5;
+    int pos_port = wsurl.indexOf(":", pos_host);
+    int pos_path = wsurl.indexOf("/", pos_host);
+
+    String wshost = wsurl.substring(pos_host, pos_port == -1 ? pos_path : pos_port);
+    int wsport = pos_port == -1 ? 80 : wsurl.substring(pos_port+1, pos_path).toInt();
+    String wspath = wsurl.substring(pos_path);
+
+    // Handshake with the server
+    webSocketClient.begin(wshost, wsport, wspath);
+    webSocketClient.setReconnectInterval(5000);
+    webSocketClient.enableHeartbeat(15000, 3000, 2);
+  }
 }
 
-void loop() {
+void loop(void) {
   checkServer.check();
   webSocket.loop();
-  
+  webSocketClient.loop();
+
   checkServer.check();
   server.handleClient();
-  
+
   checkServer.check();
   ArduinoOTA.handle();
-  
+
   checkServer.check();
   updateServer.handleClient();
   checkServer.check();
   serialEvent();
-  }
+  MDNS.update();
+}
