@@ -216,7 +216,7 @@ void setupEvent() {
 
   char wsurl[256];
   File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
-  if(!passwd_file) {
+  if(!wsurl_file) {
     strcpy(wsurl, "XXX");
   }
   else {
