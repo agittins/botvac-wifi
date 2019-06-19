@@ -24,16 +24,16 @@
 
 #define AP_SSID "neato"
 
-#define HOSTNAME "botvac-wifi"
+#define HOSTNAME "botvac-wifi2"
 #define MAX_BUFFER 8192
 
 String readString;
 String incomingErr;
-String batteryInfo;
+String batteryPercent = "";
+boolean charging = false;
 String lidarInfo;
 String serialNumber = "Empty";
 int lastBattRun = 0;
-int lastLidarRun = 0;
 int lastErrRun = 0;
 int lastTimeRun = 288;
 
@@ -51,12 +51,19 @@ void getPage() {
   if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
 
       // Only check battery once at the beginning, once every 60 seconds, or once when it got an empty response.
-      if (batteryInfo == "" || batteryInfo == "-FAIL-" || lastBattRun > 11) {
-        getBattery("FuelPercent");
+      if (batteryPercent == "" || batteryPercent == "-FAIL-" || lastBattRun > 11) {
+        batteryPercent = getBattery("FuelPercent");
         lastBattRun = 0;
       } else {
         lastBattRun++;
       }
+      if (serialNumber == "" || serialNumber == "-FAIL-" || lastBattRun > 11) {
+        charging = getBattery("ChargingActive") == "1";
+        lastBattRun = 0;
+      } else {
+        lastBattRun++;
+      }
+      
       if (incomingErr == "" || incomingErr == "-FAIL-" || lastErrRun > 11) {
         getError();
         lastErrRun = 0;
@@ -64,8 +71,21 @@ void getPage() {
         lastErrRun++;
       }
 
-      if (batteryInfo != "" && batteryInfo != "-FAIL-" && serialNumber != "Empty") {
-        webSocketClient.sendTXT("{ \"header\": { \"ts\": " + String(millis()) + ", \"type\": \"neato\", \"title\": \"neato\" }, \"payload\": {\"serial\": \"" + serialNumber + "\", \"battery\": " + batteryInfo + ", \"errorMsg\": \"" + incomingErr + "\"}}");
+      if (batteryPercent != "" && batteryPercent != "-FAIL-" && serialNumber != "Empty") {
+        webSocketClient.sendTXT(String() +
+          "{" + 
+            "\"header\": { " + 
+              "\"ts\": " + String(millis()) + "," +
+              "\"type\": \"neato\"," +
+              "\"title\": \"neato\" " + 
+            "}," + 
+            "\"payload\": {" +
+              "\"serial\": \"" + serialNumber + "\"," +
+              "\"battery\": " + batteryPercent + "," +
+              "\"charging\": " + (charging ? "true":"false") + "," +
+              "\"errorMsg\": \"" + incomingErr + "\"" +
+            "}" +
+          "}");
       }
     }
 }
@@ -133,21 +153,24 @@ void getError() {
     }
 }
 
-void getBattery(String value) {
+String getBattery(String value) {
     Serial.setTimeout(500);
     Serial.println("GetCharger");
-    String batteryInfoTemp = Serial.readString();
+    String chargerTemp = Serial.readString();
+    String val = "";
     
-    int serialString = batteryInfoTemp.indexOf(value);
+    int serialString = chargerTemp.indexOf(value);
     if (serialString > -1){
       int checkLength = value.length()+4;
       int capUntil = serialString+checkLength;
-      int commaIndex = batteryInfoTemp.substring(serialString, capUntil).indexOf(',');
-      String currentItem = batteryInfoTemp.substring(serialString,capUntil);
+      int commaIndex = chargerTemp.substring(serialString, capUntil).indexOf(',');
+      String currentItem = chargerTemp.substring(serialString,capUntil);
       currentItem.trim();
       
-      batteryInfo = currentItem.substring(commaIndex+1,capUntil);
+      val = currentItem.substring(commaIndex+1,capUntil);
     }
+
+    return val;
 }
 
 //create a couple timers that will fire repeatedly every x ms
