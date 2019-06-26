@@ -76,20 +76,20 @@ void getPage() {
       }
 
       if (batteryPercent != "" && batteryPercent != "-FAIL-" && serialNumber != "Empty") {
-        webSocketClient.sendTXT(String() +
-          "{" + 
-            "\"header\": { " + 
-              "\"ts\": " + String(millis()) + "," +
-              "\"type\": \"neato\"," +
-              "\"title\": \"neato\" " + 
-            "}," + 
-            "\"payload\": {" +
-              "\"serial\": \"" + serialNumber + "\"," +
-              "\"battery\": " + batteryPercent + "," +
-              "\"charging\": " + (charging ? "true":"false") + "," +
-              "\"errorMsg\": \"" + incomingErr + "\"" +
-            "}" +
-          "}");
+        StaticJsonDocument<600> doc;
+        JsonObject header = doc.createNestedObject("header");
+        header["ts"] = String(millis());
+        header["type"] = "neato";
+        header["title"] = "Neato Botvac (" + HOSTNAME + ")";
+        JsonObject payload = doc.createNestedObject("payload");
+        payload["serial"] = serialNumber;
+        payload["battery"] = batteryPercent.toInt();
+        payload["charging"] = charging ? true:false;
+        payload["errorMsg"] = incomingErr;
+
+        String json;
+        serializeJson(doc, json);
+        webSocketClient.sendTXT(json);
       }
     }
 }
@@ -141,20 +141,18 @@ String getSerial() {
 }
 
 void getError() {
-    Serial.setTimeout(100);
+    Serial.setTimeout(500);
     Serial.println("GetErr");
     String incomingErrTemp = Serial.readString();
-    // Check for dash in error
-    int serialString = incomingErrTemp.indexOf(" - ");
-    int capUntil = serialString-4;
-    if (serialString > -1){
-      incomingErr = rbase64.encode(incomingErrTemp.substring(capUntil,serialString));
-      incomingErr.replace('+', '-');
-      incomingErr.replace('/', '_');
-      incomingErr.replace('=', ',');
-    } else {
-      incomingErr = "";
-    }
+    incomingErrTemp.remove(0, 6); // remove the mirror back of the sent command
+    incomingErrTemp.replace("\r","");
+    incomingErrTemp.replace("\n","");
+    incomingErrTemp.trim();
+    incomingErrTemp.remove(incomingErrTemp.length()-3); // remove some crap at the end of the serial return from the Botvac
+
+    String errorCode = incomingErrTemp.substring(0, 2); //TODO: do something with the error code. :)
+
+    incomingErr = incomingErrTemp.substring(6);
 }
 
 String getBattery(String value) {
