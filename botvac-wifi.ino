@@ -13,9 +13,11 @@
 #include <ESP8266HTTPClient.h>
 #include <TimedAction.h>
 #include <rBase64.h>
+#include <ArduinoJson.h>
 
 #define SSID_FILE "/etc/ssid"
 #define PASSWORD_FILE "/etc/pass"
+#define HOSTNAME_FILE "/etc/hostname"
 #define WSURL_FILE "/etc/wsurl"
 #define SERIAL_FILE "/etc/serial"
 
@@ -24,8 +26,10 @@
 
 #define AP_SSID "neato"
 
-#define HOSTNAME "botvac-wifi2"
+
 #define MAX_BUFFER 8192
+
+String HOSTNAME = "botvac-wifi";
 
 String readString;
 String incomingErr;
@@ -237,6 +241,16 @@ void setupEvent() {
     passwd_file.close();
   }
 
+  String host;
+  File host_file = SPIFFS.open(HOSTNAME_FILE, "r");
+  if(!host_file) {
+    host = HOSTNAME;
+  }
+  else {
+    host = host_file.readString();
+    host_file.close();
+  }
+
   char wsurl[256];
   File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
   if(!wsurl_file) {
@@ -256,6 +270,9 @@ void setupEvent() {
   "WPA2 Password:<br />" +
   "<input type=\"text\" name=\"password\" value=\"" + passwd + "\"> <br />" +
   "<br />" +
+  "Hostname:<br />" +
+  "<input type=\"text\" name=\"host\" value=\"" + host + "\"> <br />" +
+  "<br />" +
   "WebSocket server URL:<br />" +
   "<input type=\"text\" name=\"wsurl\" value=\"" + wsurl + "\"> <br />" +
   "<br />" +
@@ -272,11 +289,12 @@ void setupEvent() {
 void saveEvent() {
   String user_ssid = server.arg("ssid");
   String user_password = server.arg("password");
+  String host = server.arg("host");
   String wsurl = server.arg("wsurl");
 
   SPIFFS.format();
 
-  if(user_ssid != "" && user_password != "" && wsurl.startsWith("ws://")) {
+  if(user_ssid != "" && user_password != "" && host != "" && wsurl.startsWith("ws://")) {
     SPIFFS.begin();
     File ssid_file = SPIFFS.open(SSID_FILE, "w");
     if (!ssid_file) {
@@ -294,6 +312,14 @@ void saveEvent() {
     passwd_file.print(user_password);
     passwd_file.close();
 
+    File hostname_file = SPIFFS.open(HOSTNAME_FILE, "w");
+    if (!hostname_file) {
+      server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting hostname failed!</body> </html>");
+      return;
+    }
+    hostname_file.print(host);
+    hostname_file.close();
+
     File wsurl_file = SPIFFS.open(WSURL_FILE, "w");
     if (!wsurl_file) {
       server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting WebSocket server URL failed!</body> </html>");
@@ -306,6 +332,7 @@ void saveEvent() {
     "<!DOCTYPE html><html> <body>" +
     "Setup was successful! <br />" +
     "<br />SSID was set to \"" + user_ssid + "\" with the password \"" + user_password + "\". <br />" +
+    "<br />Hostname was set to \"" + host + "\". <br />" +
     "<br />WebSocket server URL was set to \"" + wsurl + "\". <br />" +
     "<br />The controller will now reboot. Please re-connect to your Wi-Fi network.<br />" +
     "If the SSID or password was incorrect, the controller will return to Access Point mode." +
@@ -389,6 +416,12 @@ void setup(void) {
     char passwd[256];
     passwd_file.readString().toCharArray(passwd, 256);
     passwd_file.close();
+
+    if(SPIFFS.exists(HOSTNAME_FILE)) {
+      File hostname_file = SPIFFS.open(HOSTNAME_FILE, "r");
+      HOSTNAME = hostname_file.readString();
+      hostname_file.close();
+    }
 
     // attempt station connection
     WiFi.disconnect();
@@ -480,7 +513,6 @@ void setup(void) {
     // Handshake with the server
     webSocketClient.begin(wshost, wsport, wspath);
     webSocketClient.setReconnectInterval(5000);
-    webSocketClient.enableHeartbeat(15000, 3000, 2);
   }
 }
 
