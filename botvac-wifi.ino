@@ -221,9 +221,16 @@ void webSocketClientEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
     case WStype_CONNECTED:
       break;
-    case WStype_TEXT:
-      Serial.printf("%s\n", payload);
-      break;
+    case WStype_TEXT: {
+      StaticJsonDocument<200> doc;
+      deserializeJson(doc, payload);
+      const char* target = doc["target"];
+      const char* command = doc["command"];
+
+      if ((serialNumber.equals(target) || String("*").equals(target)) && command != NULL) {
+        Serial.printf("%s\n", command);
+      }
+    } break;
     case WStype_BIN:
       break;
     }
