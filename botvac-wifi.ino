@@ -4,7 +4,6 @@
 #include <ESP8266mDNS.h>
 #include <WiFiClient.h>
 #include <WebSocketsServer.h>
-#include <WebSocketsClient.h>
 #include <Hash.h>
 #include <FS.h>
 #include <WiFiUdp.h>
@@ -14,18 +13,18 @@
 #include <TimedAction.h>
 #include <rBase64.h>
 #include <ArduinoJson.h>
+#include <MQTT.h>
 
 #define SSID_FILE "/etc/ssid"
 #define PASSWORD_FILE "/etc/pass"
 #define HOSTNAME_FILE "/etc/hostname"
-#define WSURL_FILE "/etc/wsurl"
+#define MQTTURI_FILE "/etc/mqtt"
 #define SERIAL_FILE "/etc/serial"
 
 #define CONNECT_TIMEOUT_SECS 30
 #define SERIAL_NUMBER_ATTEMPTS 5
 
 #define AP_SSID "neato"
-
 
 #define MAX_BUFFER 8192
 
@@ -46,12 +45,16 @@ int bufferSize = 0;
 uint8_t currentClient = 0;
 uint8_t serialBuffer[8193];
 ESP8266WebServer server (80);
-WebSocketsServer webSocket = WebSocketsServer(81);
-WebSocketsClient webSocketClient;
 ESP8266WebServer updateServer(82);
 ESP8266HTTPUpdateServer httpUpdater;
+WebSocketsServer webSocket = WebSocketsServer(81);
+MQTTClient mqttClient(512);
 
 void getPage() {
+  if (serialNumber.equals("Empty")) {
+    serialNumber = getSerial();
+  }
+  
   if (WiFi.status() == WL_CONNECTED) { //Check WiFi connection status
 
       // Only check battery once at the beginning, once every 60 seconds, or once when it got an empty response.
@@ -76,7 +79,7 @@ void getPage() {
       }
 
       if (batteryPercent != "" && batteryPercent != "-FAIL-" && serialNumber != "Empty") {
-        StaticJsonDocument<600> doc;
+        DynamicJsonDocument doc(1024);
         JsonObject header = doc.createNestedObject("header");
         header["ts"] = String(millis());
         header["type"] = "neato";
@@ -87,9 +90,10 @@ void getPage() {
         payload["charging"] = charging ? true:false;
         payload["errorMsg"] = incomingErr;
 
-        String json;
-        serializeJson(doc, json);
-        webSocketClient.sendTXT(json);
+        String topic = "vacuum/" + serialNumber + "/out";
+        String buffer;
+        serializeJson(doc, buffer);
+        mqttClient.publish((char *) topic.c_str(), (char *) buffer.c_str());
       }
     }
 }
@@ -213,27 +217,15 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
   }
 }
 
-void webSocketClientEvent(WStype_t type, uint8_t * payload, size_t length) {
+void mqttEventSubscribe(String &topic, String &payload) {
+  StaticJsonDocument<200> doc;
+  deserializeJson(doc, payload);
+  const char* target = doc["target"];
+  const char* command = doc["command"];
 
-  switch(type) {
-    case WStype_DISCONNECTED:
-      botDissconect();
-      break;
-    case WStype_CONNECTED:
-      break;
-    case WStype_TEXT: {
-      StaticJsonDocument<200> doc;
-      deserializeJson(doc, payload);
-      const char* target = doc["target"];
-      const char* command = doc["command"];
-
-      if ((serialNumber.equals(target) || String("*").equals(target)) && command != NULL) {
-        Serial.printf("%s\n", command);
-      }
-    } break;
-    case WStype_BIN:
-      break;
-    }
+  if ((serialNumber.equals(target) || String("_all").equals(target)) && command != NULL) {
+    Serial.printf("%s\n", command);
+  }
 }
 
 void serverEvent() {
@@ -272,14 +264,14 @@ void setupEvent() {
     host_file.close();
   }
 
-  char wsurl[256];
-  File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
-  if(!wsurl_file) {
-    strcpy(wsurl, "XXX");
+  char mqtturi[256];
+  File mqtturi_file = SPIFFS.open(MQTTURI_FILE, "r");
+  if(!mqtturi_file) {
+    strcpy(mqtturi, "[username][:password]@host.domain[:port]");
   }
   else {
-    wsurl_file.readString().toCharArray(wsurl, 256);
-    wsurl_file.close();
+    mqtturi_file.readString().toCharArray(mqtturi, 256);
+    mqtturi_file.close();
   }
 
   server.send(200, "text/html", String() + 
@@ -294,8 +286,8 @@ void setupEvent() {
   "Hostname:<br />" +
   "<input type=\"text\" name=\"host\" value=\"" + host + "\"> <br />" +
   "<br />" +
-  "WebSocket server URL:<br />" +
-  "<input type=\"text\" name=\"wsurl\" value=\"" + wsurl + "\"> <br />" +
+  "MQTT server URI (mqtt[s]://[username][:password]@host.domain[:port]):<br />" +
+  "mqtt[s]://<input type=\"text\" name=\"mqtturi\" value=\"" + mqtturi + "\"> <br />" +
   "<br />" +
   "<input type=\"submit\" value=\"Submit\"> </form>" +
   "<form action=\"http://" + HOSTNAME + ".local/reboot\" style=\"display: inline;\">" +
@@ -311,11 +303,11 @@ void saveEvent() {
   String user_ssid = server.arg("ssid");
   String user_password = server.arg("password");
   String host = server.arg("host");
-  String wsurl = server.arg("wsurl");
+  String mqtturi = server.arg("mqtturi");
 
   SPIFFS.format();
 
-  if(user_ssid != "" && user_password != "" && host != "" && wsurl.startsWith("ws://")) {
+  if(user_ssid != "" && user_password != "" && host != "" && mqtturi != "") {
     SPIFFS.begin();
     File ssid_file = SPIFFS.open(SSID_FILE, "w");
     if (!ssid_file) {
@@ -341,20 +333,20 @@ void saveEvent() {
     hostname_file.print(host);
     hostname_file.close();
 
-    File wsurl_file = SPIFFS.open(WSURL_FILE, "w");
-    if (!wsurl_file) {
-      server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting WebSocket server URL failed!</body> </html>");
+    File mqtturi_file = SPIFFS.open(MQTTURI_FILE, "w");
+    if (!mqtturi_file) {
+      server.send(200, "text/html", "<!DOCTYPE html><html> <body> Setting MQTT server URI failed!</body> </html>");
       return;
     }
-    wsurl_file.print(wsurl);
-    wsurl_file.close();
+    mqtturi_file.print(mqtturi);
+    mqtturi_file.close();
 
     server.send(200, "text/html", String() + 
     "<!DOCTYPE html><html> <body>" +
     "Setup was successful! <br />" +
     "<br />SSID was set to \"" + user_ssid + "\" with the password \"" + user_password + "\". <br />" +
     "<br />Hostname was set to \"" + host + "\". <br />" +
-    "<br />WebSocket server URL was set to \"" + wsurl + "\". <br />" +
+    "<br />MQTT server URI was set to \"" + mqtturi + "\". <br />" +
     "<br />The controller will now reboot. Please re-connect to your Wi-Fi network.<br />" +
     "If the SSID or password was incorrect, the controller will return to Access Point mode." +
     "</body> </html>");
@@ -417,6 +409,55 @@ void serialEvent() {
   }
 }
 
+void mqttConnect(void) {
+  if(SPIFFS.exists(MQTTURI_FILE)) {
+    File mqtturi_file = SPIFFS.open(MQTTURI_FILE, "r");
+    String mqtturi = mqtturi_file.readString();
+    mqtturi_file.close();
+
+    int pos_host = mqtturi.indexOf("@");
+    int pos_port = mqtturi.indexOf(":", pos_host == -1 ? 0 : pos_host);
+
+    String mqtt_user = "";
+    String mqtt_pass = "";
+
+    if (pos_host >= 0) { // User & pass used
+      int pos_pass = mqtturi.indexOf(":");
+
+      if (pos_pass > pos_host) { // No pass, we found port
+        pos_pass = -1;
+      }
+
+      mqtt_user = mqtturi.substring(0, pos_pass == -1 ? pos_host : pos_pass);
+      mqtt_pass = pos_pass == -1 ? "" : mqtturi.substring(pos_pass+1, pos_host);
+    } else { // No user or pass
+      pos_host = 0; // Host at beginning
+    }
+
+    String mqtt_host = mqtturi.substring(pos_host, pos_port == -1 ? mqtturi.length()-1 : pos_port);
+    int mqtt_port = pos_port == -1 ? 1883 : mqtturi.substring(pos_port+1).toInt();
+
+    mqttClient.begin((char *) mqtt_host.c_str(), mqtt_port, client);
+    mqttClient.onMessage(mqttEventSubscribe);
+
+    for (int tries = 0; !mqttClient.connected() && tries < 5; tries++) {
+      webSocket.sendTXT(currentClient, "Connecting to MQTT...");
+
+      if (mqttClient.connect((char *) HOSTNAME.c_str(), (char *) mqtt_user.c_str(), (char *) mqtt_pass.c_str())) {
+
+        webSocket.sendTXT(currentClient, "connected");
+        webSocket.sendTXT(currentClient, "mqtt connection success");
+
+      } else {
+        delay(2000);
+        webSocket.sendTXT(currentClient, "mqtt connection failed");
+      }
+    }
+
+    mqttClient.subscribe("vacuum/+/in");
+  }
+}
+
 void setup(void) {
   Serial.begin(115200);
 
@@ -425,8 +466,6 @@ void setup(void) {
     SPIFFS.format();
     SPIFFS.begin();
   }
-
-  serialNumber = getSerial();
 
   if(SPIFFS.exists(SSID_FILE) && SPIFFS.exists(PASSWORD_FILE)) {
     File ssid_file = SPIFFS.open(SSID_FILE, "r");
@@ -516,32 +555,22 @@ void setup(void) {
   MDNS.addService("ws", "tcp", 81);
   MDNS.addService("http", "tcp", 82);
 
+  serialNumber = getSerial();
+
   webSocket.sendTXT(currentClient, "ESP-12x: Ready\n");
 
-  if(SPIFFS.exists(WSURL_FILE)) {
-    File wsurl_file = SPIFFS.open(WSURL_FILE, "r");
-    String wsurl = wsurl_file.readString();
-    wsurl_file.close();
-
-    int pos_host = 5;
-    int pos_port = wsurl.indexOf(":", pos_host);
-    int pos_path = wsurl.indexOf("/", pos_host);
-
-    String wshost = wsurl.substring(pos_host, pos_port == -1 ? pos_path : pos_port);
-    int wsport = pos_port == -1 ? 80 : wsurl.substring(pos_port+1, pos_path).toInt();
-    String wspath = wsurl.substring(pos_path);
-
-    // Handshake with the server
-    webSocketClient.begin(wshost, wsport, wspath);
-    webSocketClient.setReconnectInterval(5000);
-    webSocketClient.onEvent(webSocketClientEvent);
-  }
+  mqttConnect();
 }
 
 void loop(void) {
+  mqttClient.loop();
+
+  if (!mqttClient.connected()) {
+    mqttConnect();
+  }
+
   checkServer.check();
   webSocket.loop();
-  webSocketClient.loop();
 
   checkServer.check();
   server.handleClient();
